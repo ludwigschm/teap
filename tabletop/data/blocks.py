@@ -20,22 +20,6 @@ def load_blocks() -> List[Dict[str, Any]]:
 
     blocks: List[Dict[str, Any]] = []
 
-    practice_path = CARD_COMBINATIONS_DIR / "Paaretest.csv"
-    practice_rounds = load_csv_rounds(practice_path)
-    if practice_rounds:
-        blocks.append(
-            {
-                "index": 0,
-                "label": "Übung",
-                "csv": practice_path.name,
-                "csv_path": practice_path,
-                "path": practice_path,
-                "rounds": practice_rounds,
-                "payout": False,
-                "practice": True,
-            }
-        )
-
     order: List[Tuple[int, str, bool]] = [
         (1, "Paare1.csv", False),
         (2, "Paare2.csv", True),
