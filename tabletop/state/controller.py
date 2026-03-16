@@ -354,12 +354,8 @@ class TabletopController:
             "payout": state.current_round_has_stake,
         }
         state.post_fixation_start_required = False
-        if plan_info and state.round_in_block == 1:
-            state.fixation_required = True
-        elif plan_info:
-            state.fixation_required = False
-        else:
-            state.fixation_required = False
+        # Mock mode: no fixation sequence between rounds/blocks.
+        state.fixation_required = False
         state.pending_round_start_log = bool(plan_info)
         plan = plan_info[1] if plan_info else None
         return RoundSetupResult(plan=plan)
