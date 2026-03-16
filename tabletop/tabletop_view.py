@@ -657,6 +657,13 @@ class TabletopRoot(FloatLayout):
         self.update_role_assignments()
         self._apply_session_options_and_start()
 
+    def _clamp_start_block_choice(self, value: Any) -> int:
+        try:
+            block = int(value)
+        except (TypeError, ValueError):
+            block = 1
+        return max(1, min(5, block))
+
     def _configure_session_from_cli(self, *_args: Any) -> None:
         if self.session_configured:
             return
