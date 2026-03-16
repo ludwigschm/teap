@@ -37,11 +37,6 @@ from tabletop.logging.round_csv import (
     round_log_action_label,
     write_round_log,
 )
-from tabletop.overlay.fixation import (
-    generate_fixation_tone,
-    play_fixation_tone as overlay_play_fixation_tone,
-    run_fixation_sequence as overlay_run_fixation_sequence,
-)
 from tabletop.overlay.process import start_overlay_process, stop_overlay_process
 from tabletop.state.controller import TabletopController, TabletopState
 from tabletop.state.phases import UXPhase, to_engine_phase
@@ -179,9 +174,9 @@ class TabletopRoot(FloatLayout):
         events_factory: Callable[[str, str], Events] = Events,
         start_overlay: Callable[..., Optional[Any]] = start_overlay_process,
         stop_overlay: Callable[[Optional[Any]], Optional[Any]] = stop_overlay_process,
-        fixation_runner: Callable[..., Any] = overlay_run_fixation_sequence,
-        fixation_player: Callable[[Any], None] = overlay_play_fixation_tone,
-        fixation_tone_factory: Callable[[int], Any] = generate_fixation_tone,
+        fixation_runner: Callable[..., Any] = lambda *_args, **_kwargs: None,
+        fixation_player: Callable[[Any], None] = lambda *_args, **_kwargs: None,
+        fixation_tone_factory: Callable[[int], Any] = lambda _duration=500: None,
         bridge: Optional["PupilBridge"] = None,
         bridge_player: str = "VP1",
         bridge_session: Optional[int] = None,
@@ -595,109 +590,8 @@ class TabletopRoot(FloatLayout):
         log.info("Clock-Offset initialisiert: %s", offsets)
 
     def _emit_pre_block_sync_once(self, upcoming_block: Optional[int]) -> None:
-        if not self._bridge:
-            if upcoming_block is not None:
-                self._pre_block_sync.mark_done(upcoming_block)
-            return
-        if not self._pre_block_sync.should_sync_for(upcoming_block):
-            return
-        players = self._bridge_ready_players()
-        bridge_ref = self._bridge
-        if not players or not bridge_ref:
-            self._pre_block_sync.mark_done(upcoming_block)
-            return
-        base = self._bridge_payload_base(player=None)
-        allowed = {"session", "block", "player"}
-        for player in players:
-            payload = {
-                "session": base.get("session"),
-                "block": upcoming_block,
-                "player": player,
-            }
-            payload = {k: v for k, v in payload.items() if k in allowed}
-            try:
-                bridge_ref.send_event(
-                    "sync.block.pre",
-                    player,
-                    payload,
-                    priority="low",
-                )
-            except Exception:
-                log.exception("Pre-block sync dispatch failed for %s", player)
-        self._pre_block_sync.mark_done(upcoming_block)
+        return None
 
-    def send_bridge_event(
-        self, name: str, payload: Optional[Dict[str, Any]] = None
-    ) -> None:
-        if not self._bridge:
-            return
-        self._ensure_bridge_recordings()
-        players = self._bridge_ready_players()
-        if not players:
-            return
-        priority = "high" if name.startswith(("sync.", "fix.")) else "normal"
-        payload_copy: Dict[str, Any] = {}
-        if payload:
-            payload_copy.update(payload)
-
-        def _dispatch() -> None:
-            bridge_ref = self._bridge
-            if not bridge_ref:
-                return
-            for player in players:
-                event_payload = self._bridge_payload_base(player=player)
-                event_payload.update(payload_copy)
-                event_payload = {
-                    k: v for k, v in event_payload.items() if k in ALLOWED_EVENT_KEYS
-                }
-                try:
-                    bridge_ref.send_event(
-                        name,
-                        player,
-                        event_payload,
-                        priority=priority,
-                    )
-                except Exception:
-                    log.exception("Bridge event dispatch failed: %s", name)
-
-        self._bridge_dispatcher.submit(_dispatch)  # non-blocking: moved to worker
-
-    def _emit_button_bridge_event(
-        self,
-        button: str,
-        *,
-        player: Optional[int] = None,
-        extra: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        del button, player, extra  # inputs retained for backwards compatibility
-        # Button bridge events are now local-only. External forwarding was removed
-        # to avoid duplicate touches on Pupil/Neon bridges.
-        return
-
-    # ------------------------------------------------------------------
-    # Session helpers
-    def _available_block_count(self) -> int:
-        blocks = self._blocks or []
-        return len(blocks)
-
-    def _clamp_start_block_choice(self, choice: int) -> int:
-        total = self._available_block_count()
-        if total <= 0:
-            return 1
-        return max(1, min(choice, total))
-
-    def _start_block_from_cli(self, block_index: Optional[int]) -> int:
-        total = self._available_block_count()
-        if total <= 0:
-            return 1
-        try:
-            index = int(block_index) if block_index is not None else 0
-        except (TypeError, ValueError):
-            index = 0
-        index = max(0, min(index, total - 1))
-        return index + 1
-
-    @staticmethod
     def _strict_logging_enabled() -> bool:
         return os.getenv("STRICT_LOGGING") == "1"
 
@@ -756,44 +650,17 @@ class TabletopRoot(FloatLayout):
             for ch in self.session_id
         ) or 'session'
 
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        db_path = self.log_dir / f'events_{safe_session_id}.sqlite3'
         self.session_storage_id = safe_session_id
-        self.logger = self.events_factory(self.session_id, str(db_path))
-        # Perform the one-time offset calibration before any events are emitted.
+        self.logger = None
         self._time_offset_calibrated = False
-        self._calibrate_time_offset_once()
         self.session_configured = True
-        init_round_log(self)
         self.update_role_assignments()
-
-        self.log_event(
-            None,
-            'session_start',
-            {
-                'session_number': self.session_number,
-                'session_id': self.session_id,
-                'aruco_enabled': self.aruco_enabled,
-                'start_block': self.start_block,
-                'start_mode': self.start_mode,
-            },
-        )
-        self._mark_bridge_dirty()
-        self._ensure_bridge_recordings()
         self._apply_session_options_and_start()
 
     def _configure_session_from_cli(self, *_args: Any) -> None:
         if self.session_configured:
             return
-        if self._bridge_session is None:
-            self.prompt_session_number()
-            return
-        start_block_value = self._start_block_from_cli(self._bridge_block)
-        self._finalize_session_setup(
-            str(self._bridge_session),
-            start_block_value=start_block_value,
-            aruco_enabled=self.aruco_enabled,
-        )
+        self._finalize_session_setup("demo", start_block_value=1, aruco_enabled=False)
 
     # --- Layout & Elemente
     def _configure_widgets(self):
@@ -1435,20 +1302,12 @@ class TabletopRoot(FloatLayout):
             self._record_handler_duration('start_pressed', started)
 
     def run_fixation_sequence(self, on_complete=None):
-        self.fixation_runner(
-            self,
-            schedule_once=Clock.schedule_once,
-            stop_image=FIX_STOP_IMAGE,
-            live_image=FIX_LIVE_IMAGE,
-            on_complete=on_complete,
-            bridge=self._bridge,
-            players=sorted(self._bridge_players) if self._bridge_players else None,
-            player=self._bridge_player,
-            session=self._bridge_session,
-            block=self._bridge_block,
-        )
+        if on_complete:
+            on_complete()
 
     def play_fixation_tone(self):
+        return None
+
         self.fixation_player(self)
 
     def tap_card(self, who:int, which:str):
@@ -1666,47 +1525,13 @@ class TabletopRoot(FloatLayout):
             return None
 
     def _push_cloud_marker(self, event_id: str) -> None:
-        event = {
-            "session": self.session_number,
-            "block": self._current_block_index(),
-            "event_id": event_id,
-            "t_ns": now_ns(),
-            "t_utc_iso": datetime.utcnow().isoformat(),
-        }
-        push_async(event)
+        return None
 
     def _maybe_send_block_start_marker(self) -> None:
-        block_index = self._current_block_index()
-        if block_index is None:
-            return
-        try:
-            round_in_block = int(self.round_in_block or 0)
-        except (TypeError, ValueError):
-            return
-        if round_in_block != 1:
-            return
-        start_sent = self._block_markers_sent.setdefault("start", set())
-        if block_index in start_sent:
-            return
-        start_sent.add(block_index)
-        self._push_cloud_marker(f"start.block{block_index}")
+        return None
 
     def _maybe_send_block_end_marker(self) -> None:
-        block_index = self._current_block_index()
-        if block_index is None:
-            return
-        try:
-            round_in_block = int(self.round_in_block or 0)
-            total_rounds = int(self.current_block_total_rounds or 0)
-        except (TypeError, ValueError):
-            return
-        if total_rounds <= 0 or round_in_block != total_rounds:
-            return
-        end_sent = self._block_markers_sent.setdefault("end", set())
-        if block_index in end_sent:
-            return
-        end_sent.add(block_index)
-        self._push_cloud_marker(f"end.block{block_index}")
+        return None
 
     def prepare_next_round(self, start_immediately: bool = False):
         result = self.controller.prepare_next_round(start_immediately=start_immediately)
@@ -2139,111 +1964,14 @@ class TabletopRoot(FloatLayout):
         t_utc_iso: Optional[str] = None,
         blocking: Optional[bool] = None,
     ):
-        if not self.logger or not self.session_configured:
-            return None
-        if isinstance(payload, dict):
-            payload_dict = dict(payload)
-        elif payload is None:
-            payload_dict = {}
-        else:
-            payload_dict = {"value": payload}
-        if t_ns is None:
-            # Host UNIX timestamp in nanoseconds used as the canonical event time.
-            t_ns = now_ns()
-        if t_utc_iso is None:
-            t_utc_iso = datetime.utcnow().isoformat()
-        if "event_timestamp_unix_ns" not in payload_dict:
-            payload_dict["event_timestamp_unix_ns"] = t_ns
-        payload_dict.setdefault("t_ns", t_ns)
-        payload_dict.setdefault("t_utc_iso", t_utc_iso)
-        event_id = event_id or str(uuid.uuid4())
-        payload_dict.setdefault("event_id", event_id)
-        vp_role = self.role_by_physical.get(player) if player in (1, 2) else None
-        if vp_role == 1:
-            payload_dict.setdefault("event_id_vp1", event_id)
-            payload_dict.setdefault("event_id_vp2", "")
-        elif vp_role == 2:
-            payload_dict.setdefault("event_id_vp1", "")
-            payload_dict.setdefault("event_id_vp2", event_id)
-        payload_dict.setdefault("phase", phase)
-        actor = self._actor_label(player)
-        round_idx = max(0, self.round - 1)
-        event_payload = {
-            "session_id": self.session_id,
-            "round_idx": round_idx,
-            "engine_phase": self.current_engine_phase(),
-            "actor": actor,
-            "action": action,
-            "payload": payload_dict,
-            "event_id": event_id,
-            "phase": phase,
-            "t_ns": t_ns,
-            "t_utc_iso": t_utc_iso,
-        }
-        if player is not None:
-            event_payload["player"] = player
-        effective_blocking = (
-            blocking if blocking is not None else os.getenv("STRICT_LOGGING") == "1"
-        )
-        record = self.logger.log_event(event_payload, blocking=effective_blocking)
-        decision_actions = {"pick_signal", "pick_decision"}
-        system_actions = {
-            "session_start",
-            "fixation_flash",
-            "fixation_beep",
-            "showdown",
-        }
-        should_log = False
-        if phase == "input_received":
-            accepted = payload_dict.get("accepted", True)
-            if accepted and action in decision_actions:
-                should_log = True
-            # Treat any explicit button interaction (start presses, card taps,
-            # signal/decision choices, etc.) as noteworthy for the round log so
-            # we have a complete record of all participant inputs.
-            if "button" in payload_dict:
-                should_log = True
-        if action in system_actions:
-            should_log = True
-        if should_log:
-            write_round_log(self, actor, action, payload_dict, player, t_ns=t_ns)
-        base = self._bridge_payload_base(player=None)
-        bridge_event = {k: base[k] for k in ("session", "block", "player") if k in base}
-        bridge_event.update(
-            {
-                "round_index": round_idx,
-                "actor": actor,
-                "event_id": event_id,
-            }
-        )
-        if phase == "input_received":
-            bridge_event["phase"] = phase
-        if player is not None:
-            bridge_event["game_player"] = player
-        role_value = self.player_roles.get(player)
-        if role_value is not None:
-            bridge_event["player_role"] = role_value
-        for key in ("button", "accepted", "decision"):
-            if key in payload_dict:
-                bridge_event[key] = payload_dict[key]
-        bridge_event["t_ns"] = t_ns
-        bridge_event["t_utc_iso"] = t_utc_iso
-        bridge_event = {k: v for k, v in bridge_event.items() if k in ALLOWED_EVENT_KEYS}
-        # Downstream analytics rely on this event_id – every payload keeps it so
-        # event CSVs can be matched by identifier rather than implicit ordering.
-        should_forward = phase == "input_received"
-        if not should_forward and action in {
-            "session_start",
-            "round_start",
-            "showdown",
-            "session_end",
-        }:
-            should_forward = True
-        if should_forward and self.marker_bridge and action != "round_start":
-            self.marker_bridge.enqueue(f"action.{action}", bridge_event)
-        return record
+        return None
 
     def prompt_session_number(self):
+        if self.session_configured:
+            return
+        self._finalize_session_setup("demo", start_block_value=1, aruco_enabled=False)
+
+
         if self.session_popup:
             return
 
@@ -2363,13 +2091,7 @@ class TabletopRoot(FloatLayout):
             return self.start_overlay(process)
 
     def _apply_session_options_and_start(self):
-        if self._aruco_proc is None and getattr(self, 'overlay_process', None):
-            self._aruco_proc = self.overlay_process
-
-        if self.aruco_enabled:
-            self._aruco_proc = self._start_overlay_with_path(self._aruco_proc)
-        else:
-            self._aruco_proc = self.stop_overlay(self._aruco_proc)
+        self._aruco_proc = self.stop_overlay(self._aruco_proc)
         self.overlay_process = self._aruco_proc
 
         if not self._blocks:
@@ -2384,12 +2106,7 @@ class TabletopRoot(FloatLayout):
 
         self._pre_block_sync.mark_done(None)
 
-        start_index = max(0, min(len(available_blocks) - 1, self.start_block - 1))
-        selected_blocks = available_blocks[start_index:]
-        if not selected_blocks:
-            selected_blocks = available_blocks[-1:]
-
-        self.blocks = selected_blocks
+        self.blocks = available_blocks[:1]
         self.current_block_idx = 0
         self.current_round_idx = 0
         self.current_block_info = None
