@@ -1267,6 +1267,7 @@ class TabletopRoot(FloatLayout):
         if result.blocked:
             return
         if result.intro_deactivated:
+            self.intro_active = False
             self.update_user_displays()
             self.update_intro_overlay()
 
@@ -1645,6 +1646,7 @@ class TabletopRoot(FloatLayout):
 
     def goto(self, phase):
         self.phase = phase
+        self.controller.state.phase = phase
         self.apply_phase()
 
     def _current_block_index(self) -> Optional[int]:
