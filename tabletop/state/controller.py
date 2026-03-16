@@ -264,42 +264,10 @@ class TabletopController:
         block = state.blocks[state.current_block_idx]
         state.current_round_idx += 1
         if state.current_round_idx >= len(block.get("rounds") or []):
-            completed_block = block
-            state.current_block_idx += 1
             state.current_round_idx = 0
-            if state.current_block_idx >= len(state.blocks):
-                state.session_finished = True
-                state.in_block_pause = False
-                state.pause_message = (
-                    "Vielen Dank die Teilnahme! Das Experiment ist nun beendet!"
-                )
-                state.next_block_preview = None
-            else:
-                state.in_block_pause = True
-                next_block = state.blocks[state.current_block_idx]
-                next_block_index_raw = next_block.get("index")
-                try:
-                    next_block_index = int(next_block_index_raw)
-                except (TypeError, ValueError):
-                    next_block_index = state.current_block_idx + 1
-                condition = (
-                    "[b]Masken[/b] getragen werden."
-                    if self.is_monetary_block(next_block_index, state.start_mode)
-                    else "[b]keine Masken[/b] getragen werden."
-                )
-                state.pause_message = (
-                    "[b]Blockende[/b]\n"
-                    "Dieser Block ist vorbei. Nehmen Sie sich einen Moment zum Durchatmen.\n"
-                    "Wenn Sie bereit sind, klicken Sie auf weiter.\n"
-                    " \n"
-                    f"Es folgt Block {next_block_index},\n"
-                    f"in dem {condition}."
-                )
-                state.next_block_preview = {
-                    "block": next_block,
-                    "round_index": 0,
-                    "round_in_block": 1,
-                }
+            state.in_block_pause = False
+            state.session_finished = False
+            state.next_block_preview = None
 
         state.round = self.compute_global_round()
 
@@ -354,12 +322,7 @@ class TabletopController:
             "payout": state.current_round_has_stake,
         }
         state.post_fixation_start_required = False
-        if plan_info and state.round_in_block == 1:
-            state.fixation_required = True
-        elif plan_info:
-            state.fixation_required = False
-        else:
-            state.fixation_required = False
+        state.fixation_required = False
         state.pending_round_start_log = bool(plan_info)
         plan = plan_info[1] if plan_info else None
         return RoundSetupResult(plan=plan)
@@ -406,18 +369,9 @@ class TabletopController:
         start_phase = self.phase_for_player(state.first_player or 1, "inner")
         if start_phase is None:
             start_phase = UXPhase.P1_INNER
-        requires_fixation = bool(state.fixation_required)
+        requires_fixation = False
         await_second_start = False
-        if state.post_fixation_start_required:
-            state.post_fixation_start_required = False
-            state.phase = start_phase
-        elif state.fixation_required:
-            state.fixation_required = False
-            state.post_fixation_start_required = True
-            await_second_start = True
-            state.phase = UXPhase.WAIT_BOTH_START
-        else:
-            state.phase = start_phase
+        state.phase = start_phase
         return ContinueResult(
             blocked=False,
             intro_deactivated=intro_deactivated,
@@ -440,12 +394,8 @@ class TabletopController:
             start_phase = self.phase_for_player(state.first_player or 1, "inner")
             if start_phase is None:
                 start_phase = UXPhase.P1_INNER
-        requires_fixation = bool(state.fixation_required)
+        requires_fixation = False
         await_second_start = False
-        if start_immediately and requires_fixation:
-            state.fixation_required = False
-            state.post_fixation_start_required = True
-            await_second_start = True
         return PrepareNextRoundResult(
             setup=setup,
             in_block_pause=state.in_block_pause,
