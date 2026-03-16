@@ -29,7 +29,6 @@ from tabletop.core.clock import now_ns
 from tabletop.data.blocks import load_blocks, load_csv_rounds, value_to_card_path
 from tabletop.data.config import ARUCO_OVERLAY_PATH, ROOT
 from tabletop.logging import async_bridge
-from tabletop.logging.events_bridge import push_async
 from tabletop.logging.events import Events
 from tabletop.logging.round_csv import (
     close_round_log,
@@ -275,10 +274,7 @@ class TabletopRoot(FloatLayout):
         self._configure_widgets()
         self.setup_round()
         self.apply_phase()
-        if self._single_block_mode and self._bridge_session is not None and self._bridge_block is not None:
-            Clock.schedule_once(self._configure_session_from_cli, 0.1)
-        else:
-            Clock.schedule_once(lambda *_: self.prompt_session_number(), 0.1)
+        Clock.schedule_once(self._configure_mock_session, 0.1)
 
     def __setattr__(self, key, value):
         if key == 'start_mode':
@@ -782,6 +778,17 @@ class TabletopRoot(FloatLayout):
         self._ensure_bridge_recordings()
         self._apply_session_options_and_start()
 
+    def _configure_mock_session(self, *_args: Any) -> None:
+        if self.session_configured:
+            return
+        self.session_id = "mock"
+        self.session_number = 1
+        self.session_storage_id = "mock"
+        self.session_configured = True
+        self.start_block = 1
+        self.aruco_enabled = False
+        self._apply_session_options_and_start()
+
     def _configure_session_from_cli(self, *_args: Any) -> None:
         if self.session_configured:
             return
@@ -1270,10 +1277,7 @@ class TabletopRoot(FloatLayout):
             self.log_round_start_if_pending()
             self.apply_phase()
 
-        if result.requires_fixation and not self.fixation_running:
-            self.run_fixation_sequence(proceed)
-        else:
-            proceed()
+        proceed()
 
     def start_pressed(self, who:int):
         started = time.perf_counter()
@@ -1323,8 +1327,6 @@ class TabletopRoot(FloatLayout):
             if blocked_reason is not None:
                 return
 
-            if action == "start_click":
-                self._maybe_send_block_start_marker()
 
             if who == 1:
                 self.p1_pressed = True
@@ -1435,21 +1437,11 @@ class TabletopRoot(FloatLayout):
             self._record_handler_duration('start_pressed', started)
 
     def run_fixation_sequence(self, on_complete=None):
-        self.fixation_runner(
-            self,
-            schedule_once=Clock.schedule_once,
-            stop_image=FIX_STOP_IMAGE,
-            live_image=FIX_LIVE_IMAGE,
-            on_complete=on_complete,
-            bridge=self._bridge,
-            players=sorted(self._bridge_players) if self._bridge_players else None,
-            player=self._bridge_player,
-            session=self._bridge_session,
-            block=self._bridge_block,
-        )
+        if on_complete is not None:
+            Clock.schedule_once(lambda *_: on_complete(), 0)
 
     def play_fixation_tone(self):
-        self.fixation_player(self)
+        return
 
     def tap_card(self, who:int, which:str):
         started = time.perf_counter()
@@ -1634,7 +1626,6 @@ class TabletopRoot(FloatLayout):
             )
             if not result.accepted:
                 return
-            self._maybe_send_block_end_marker()
             for choice, btn_id in self.decision_buttons.get(player, {}).items():
                 btn = self.wid_safe(btn_id)
                 if btn is None:
@@ -1666,47 +1657,13 @@ class TabletopRoot(FloatLayout):
             return None
 
     def _push_cloud_marker(self, event_id: str) -> None:
-        event = {
-            "session": self.session_number,
-            "block": self._current_block_index(),
-            "event_id": event_id,
-            "t_ns": now_ns(),
-            "t_utc_iso": datetime.utcnow().isoformat(),
-        }
-        push_async(event)
+        return
 
     def _maybe_send_block_start_marker(self) -> None:
-        block_index = self._current_block_index()
-        if block_index is None:
-            return
-        try:
-            round_in_block = int(self.round_in_block or 0)
-        except (TypeError, ValueError):
-            return
-        if round_in_block != 1:
-            return
-        start_sent = self._block_markers_sent.setdefault("start", set())
-        if block_index in start_sent:
-            return
-        start_sent.add(block_index)
-        self._push_cloud_marker(f"start.block{block_index}")
+        return
 
     def _maybe_send_block_end_marker(self) -> None:
-        block_index = self._current_block_index()
-        if block_index is None:
-            return
-        try:
-            round_in_block = int(self.round_in_block or 0)
-            total_rounds = int(self.current_block_total_rounds or 0)
-        except (TypeError, ValueError):
-            return
-        if total_rounds <= 0 or round_in_block != total_rounds:
-            return
-        end_sent = self._block_markers_sent.setdefault("end", set())
-        if block_index in end_sent:
-            return
-        end_sent.add(block_index)
-        self._push_cloud_marker(f"end.block{block_index}")
+        return
 
     def prepare_next_round(self, start_immediately: bool = False):
         result = self.controller.prepare_next_round(start_immediately=start_immediately)
@@ -1745,9 +1702,7 @@ class TabletopRoot(FloatLayout):
             else:
                 start_round()
 
-        if result.requires_fixation and not self.fixation_running:
-            self.run_fixation_sequence(after_fixation)
-        elif start_immediately:
+        if start_immediately:
             start_round()
 
     def setup_round(self):
@@ -2139,8 +2094,7 @@ class TabletopRoot(FloatLayout):
         t_utc_iso: Optional[str] = None,
         blocking: Optional[bool] = None,
     ):
-        if not self.logger or not self.session_configured:
-            return None
+        return None
         if isinstance(payload, dict):
             payload_dict = dict(payload)
         elif payload is None:
@@ -2384,7 +2338,7 @@ class TabletopRoot(FloatLayout):
 
         self._pre_block_sync.mark_done(None)
 
-        start_index = max(0, min(len(available_blocks) - 1, self.start_block - 1))
+        start_index = 0
         selected_blocks = available_blocks[start_index:]
         if not selected_blocks:
             selected_blocks = available_blocks[-1:]
