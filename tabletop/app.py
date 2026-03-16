@@ -37,15 +37,12 @@ from kivy.uix.popup import Popup
 
 from tabletop.core.clock import now_ns
 from tabletop.data.config import ARUCO_OVERLAY_PATH
-from tabletop.logging.round_csv import close_round_log, flush_round_log
-from tabletop.logging.events_bridge import init_client as init_pupylabs_client
 from tabletop.overlay.process import (
     OverlayProcess,
     start_overlay,
     stop_overlay,
 )
 from tabletop.tabletop_view import TabletopRoot
-from tabletop.pupil_bridge import PupilBridge
 from tabletop.utils.runtime import (
     is_low_latency_disabled,
     is_perf_logging_enabled,
@@ -54,24 +51,6 @@ from tabletop.utils.runtime import (
 log = logging.getLogger(__name__)
 
 _KV_LOADED = False
-
-_pupylabs_timeout = os.environ.get("PUPYLABS_TIMEOUT_S", "2.0")
-_pupylabs_retries = os.environ.get("PUPYLABS_MAX_RETRIES", "3")
-try:
-    _timeout_value = float(_pupylabs_timeout)
-except (TypeError, ValueError):
-    _timeout_value = 2.0
-try:
-    _retry_value = int(_pupylabs_retries)
-except (TypeError, ValueError):
-    _retry_value = 3
-
-init_pupylabs_client(
-    base_url=os.environ.get("PUPYLABS_BASE_URL", "https://cloud.pupylabs.example"),
-    api_key=os.environ.get("PUPYLABS_API_KEY", ""),
-    timeout_s=_timeout_value,
-    max_retries=_retry_value,
-)
 
 
 class TabletopApp(App):
@@ -84,7 +63,7 @@ class TabletopApp(App):
         block: Optional[int] = None,
         player: str = "auto",
         players: Optional[Sequence[str]] = None,
-        bridge: Optional[PupilBridge] = None,
+        bridge: Optional[Any] = None,
         single_block_mode: bool = False,
         logging_queue: Optional[Queue] = None,
         bridge_error: Optional[str] = None,
@@ -99,7 +78,7 @@ class TabletopApp(App):
         )
 
         self._configure_startup_display(self._target_display_index)
-        self._bridge: Optional[PupilBridge] = bridge
+        self._bridge: Optional[Any] = bridge
         self._session: Optional[int] = session
         self._block: Optional[int] = block
         requested_players: set[str] = set()
@@ -795,12 +774,6 @@ class TabletopApp(App):
                 if callable(close_fn):
                     close_fn()
                 root.logger = None
-            flush_round_log(
-                root,
-                force=True,
-                wait=not self._low_latency_disabled,
-            )
-            close_round_log(root)
 
         if root is not None:
             shutdown_sync = getattr(root, "shutdown_sync_services", None)
@@ -973,50 +946,23 @@ def main(
     block: Optional[int] = None,
     player: str = "auto",
 ) -> None:
-    """Run the tabletop Kivy application with optional Pupil bridge integration."""
+    """Run the tabletop Kivy application in local mock mode."""
 
     logging_listener, logging_queue = _configure_async_logging()
 
-    bridge = PupilBridge()
-    connect_error: Optional[str] = None
-    try:
-        bridge.connect()
-    except Exception as exc:  # pragma: no cover - defensive fallback
-        connect_error = str(exc)
-        log.error("Companion-Verbindung fehlgeschlagen: %s", exc)
-        log.debug("Stacktrace für Companion-Verbindungsfehler", exc_info=True)
-
-    try:
-        connected_players = bridge.connected_players()
-    except AttributeError:
-        connected_players = set()
-
-    desired_players = _resolve_requested_players(player, connected=connected_players)
-
-    single_block_mode = session is not None and block is not None
-
     app = TabletopApp(
-        session=session,
-        block=block,
+        session=1,
+        block=1,
         player=player,
-        players=desired_players,
-        bridge=bridge,
-        single_block_mode=single_block_mode,
+        players={"VP1", "VP2"},
+        bridge=None,
+        single_block_mode=True,
         logging_queue=logging_queue,
-        bridge_error=connect_error,
+        bridge_error=None,
     )
     try:
         app.run()
     finally:
-        for tracked in desired_players:
-            try:
-                bridge.stop_recording(tracked)
-            except Exception:  # pragma: no cover - defensive fallback
-                log.exception("Failed to stop recording during shutdown for %s", tracked)
-        try:
-            bridge.close()
-        except Exception:  # pragma: no cover - defensive fallback
-            log.exception("Failed to close Pupil bridge")
         if logging_listener is not None:
             logging_listener.stop()
 
